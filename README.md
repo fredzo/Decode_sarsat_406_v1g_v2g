@@ -36,6 +36,14 @@ to run as a systemd service; see "Real-time scanner" below.
 
 ---
 
+## Prepare for build
+```bash
+sudo apt update
+sudo apt install libfftw3-dev
+sudo apt install libfftw3f-dev
+sudo apt install librtlsdr-dev
+```
+
 ## Build
 
 ```bash
