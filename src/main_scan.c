@@ -57,6 +57,12 @@
 #define BURST_AVG 24     /* spectra averaged to measure a finished burst */
 #define MIN_BURST_SAMP ((uint64_t)(0.20 * SAMP_RATE))
 #define MAX_BURST_SAMP ((uint64_t)(1.50 * SAMP_RATE))
+/* A real SGB frame is ~1 s (300 bps over 300 bits + preamble). Detections
+ * shorter than this are burst edges / interference (typically reported as
+ * wide ~100 kHz, 0.2-0.6 s): they can never satisfy the DSSS chain's
+ * one-second buffer requirement, so dispatching them only burns CPU on a
+ * guaranteed 'buffer too short' failure and lets the ring lap the reader. */
+#define MIN_SGB_SAMP ((uint64_t)(0.75 * SAMP_RATE))
 #define BW_SPLIT_HZ 20000.0 /* FGB / SGB split (-10 dB bandwidth) */
 #define BURST_BW_MAX 150000.0 /* reject bursts wider than any real beacon */
 #define HEARTBEAT_S 15
@@ -719,10 +725,17 @@ static void *process_thread(void *arg) {
                  timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
                  type, bsnr, (double)len / SAMP_RATE, dt);
           fflush(stdout);
-          if (bwmeas > BW_SPLIT_HZ)
-            decode_sgb(burst_start, len, fmeas, bsnr);
-          else
+          if (bwmeas > BW_SPLIT_HZ) {
+            if (len >= MIN_SGB_SAMP)
+              decode_sgb(burst_start, len, fmeas, bsnr);
+            else
+              printf("  SGB burst too short (%.2f s < %.2f s) — "
+                     "skipped (partial/spurious detection)\n\n",
+                     (double)len / SAMP_RATE,
+                     (double)MIN_SGB_SAMP / SAMP_RATE);
+          } else {
             decode_fgb(burst_start, len, fmeas, bsnr);
+          }
         }
         state = 0;
         above = 0;
