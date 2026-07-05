@@ -55,15 +55,14 @@
 #define OFF_FRAMES 16    /* frames a cluster absent  -> burst end */
 #define WARMUP_FRAMES 64 /* frames to settle the per-bin noise floor */
 #define BURST_AVG 24     /* spectra averaged to measure a finished burst */
+#define BW_SPLIT_HZ 20000.0     /* FGB / SGB split (-10 dB bandwidth) */
 #define MIN_BURST_SAMP ((uint64_t)(0.20 * SAMP_RATE))
 #define MAX_BURST_SAMP ((uint64_t)(1.50 * SAMP_RATE))
-/* A real SGB frame is ~1 s (300 bps over 300 bits + preamble). Detections
- * shorter than this are burst edges / interference (typically reported as
- * wide ~100 kHz, 0.2-0.6 s): they can never satisfy the DSSS chain's
- * one-second buffer requirement, so dispatching them only burns CPU on a
- * guaranteed 'buffer too short' failure and lets the ring lap the reader. */
-#define MIN_SGB_SAMP ((uint64_t)(0.75 * SAMP_RATE))
-#define BW_SPLIT_HZ 20000.0 /* FGB / SGB split (-10 dB bandwidth) */
+/* T.001 §2.2.2: FGB 440/520 ms.  T.018 §2.3: SGB 1000 ms. */
+#define FGB_DUR_MIN 0.35
+#define FGB_DUR_MAX 0.80
+#define SGB_DUR_MIN 0.80
+#define SGB_DUR_MAX 1.25
 #define BURST_BW_MAX 150000.0 /* reject bursts wider than any real beacon */
 #define HEARTBEAT_S 15
 #define FGB_DECIM 128                    /* IQ decimation, FGB path */
@@ -486,6 +485,11 @@ static int measure_burst(uint64_t start, uint64_t len, double *freq_off,
     }
   }
 
+  for (int k = 0; k < FFT_N; k++) {
+    spec[k] -= (double)navg * floor_bin[k];
+    if (spec[k] < 0.0) spec[k] = 0.0;
+  }
+
   const double binhz = (double)SAMP_RATE / FFT_N;
   double peak = 0.0;
   for (int k = 0; k < FFT_N; k++) {
@@ -711,34 +715,36 @@ static void *process_thread(void *arg) {
         if (len >= MIN_BURST_SAMP && len <= MAX_BURST_SAMP &&
             measure_burst(burst_start, len, &fmeas, &bwmeas)) {
           const char *type = (bwmeas > BW_SPLIT_HZ) ? "SGB" : "FGB";
-          /* Sample-accurate gap since the previous burst onset — reveals
-           * the tens-of-ms grouping that wall-clock print latency blurs. */
+          double dur_s = (double)len / SAMP_RATE;
+          int is_sgb = (bwmeas > BW_SPLIT_HZ);
+          int dur_ok = is_sgb ? (dur_s >= SGB_DUR_MIN && dur_s <= SGB_DUR_MAX)
+                              : (dur_s >= FGB_DUR_MIN && dur_s <= FGB_DUR_MAX);
           static uint64_t prev_burst_start = 0;
-          /* burst_start < prev means g_wr was reset on an rtl_sdr restart;
-           * skip the cross-cycle gap (would underflow). */
           double dt = (prev_burst_start && burst_start >= prev_burst_start)
                           ? (double)(burst_start - prev_burst_start) / SAMP_RATE
                           : 0.0;
           prev_burst_start = burst_start;
-          printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
-                 "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+          if (!dur_ok) {
+            DIAG("[%s] REJECT %.4f MHz   BW ~%3.0f kHz   %s   "
+                 "dur %.2f s (out of range)\n",
                  timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
-                 type, bsnr, (double)len / SAMP_RATE, dt);
-          fflush(stdout);
-          if (bwmeas > BW_SPLIT_HZ) {
-            if (len >= MIN_SGB_SAMP)
+                 type, dur_s);
+          } else {
+            printf("[%s] BURST  %.4f MHz   BW ~%3.0f kHz   %s   "
+                   "SNR %2.0f dB   dur %.2f s   dt %.3f s\n",
+                   timestr_ms(), (g_center_hz + fmeas) / 1e6, bwmeas / 1e3,
+                   type, bsnr, dur_s, dt);
+            fflush(stdout);
+            if (is_sgb)
               decode_sgb(burst_start, len, fmeas, bsnr);
             else
-              printf("  SGB burst too short (%.2f s < %.2f s) — "
-                     "skipped (partial/spurious detection)\n\n",
-                     (double)len / SAMP_RATE,
-                     (double)MIN_SGB_SAMP / SAMP_RATE);
-          } else {
-            decode_fgb(burst_start, len, fmeas, bsnr);
+              decode_fgb(burst_start, len, fmeas, bsnr);
           }
         }
         state = 0;
         above = 0;
+        for (int k = 0; k < FFT_N; k++)
+          if (hotb[k]) floor_bin[k] = P[k];
       }
     }
 

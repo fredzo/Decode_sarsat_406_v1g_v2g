@@ -20,19 +20,45 @@ beacons at 406 MHz.
   loop): DC blocker → FFT-correlation frequency acquisition → NCO wipeoff →
   OQPSK delay → multi-offset boxcar decimation → despread with preamble
   linear-fit frequency estimation + per-bit Costas PLL → BCH. Oracle tries
-  4 boxcar offsets × 4 Costas phases (16 combos) before giving up.
-  93 % decode rate at 80 km relay.
+  4 boxcar offsets × 4 Costas phases (16 combos) before giving up. The
+  acquisition lag search is capped to the burst pre-roll to avoid late
+  noise/data peaks beating the true preamble. The FFT-correlation frequency
+  search spans ±16 kHz, which covers scanner centroid errors observed on
+  real CNES SGB bursts.
 - **FGB IQ-direct (1G)** — `fgb_iq_demod.c`: complex baseband BPSK biphase-L
   decoder without FM-demod → audio detour. Dual-grid CW end detection,
   multi-phase Costas search (4 initial phases × 13 offsets), Manchester
-  slicer, BCH1 brute-force error correction (t=3), CRC. 92 % decode rate
-  at 80 km relay (evening propagation).
+  slicer, BCH1 brute-force error correction (t=3), CRC.
 
 ### Real-time scanner
-`dec406_scan` ingests RTL-SDR samples directly via librtlsdr (synchronous
-mode), runs a spectral burst detector over the 100 kHz band, classifies
-each burst as FGB or SGB by bandwidth, and decodes accordingly. Designed
-to run as a systemd service; see "Real-time scanner" below.
+`dec406_scan` is a unified real-time scanner with automatic SDR backend
+selection (Airspy Mini, RTL-SDR, PlutoSDR). The RTL-SDR backend uses
+`rtlsdr_read_async()` with large buffers; the previous synchronous path could
+silently underfeed the scanner and corrupt long FGB/SGB bursts. The scanner
+runs a spectral burst detector over the 100 kHz band, classifies each burst as
+FGB or SGB by bandwidth, and decodes accordingly. Designed to run as a systemd
+service; see "Real-time scanner" below.
+
+### Current validation status
+
+Rates depend strongly on propagation, time of day, local noise, and which CNES
+system beacons are active. Track three SGB buckets separately:
+
+| Metric | Definition |
+|--------|------------|
+| SGB acquisition/sync | `(BCH OK + FRAME REJECTED) / detected SGB bursts` |
+| SGB decoder purity | `BCH OK / (BCH OK + FRAME REJECTED)` |
+| SGB end-to-end | `BCH OK / detected SGB bursts` |
+
+Recent validation after the async RTL fix, fredzo SGB corrections, and the
+±16 kHz acquisition search showed no "strong preamble sync then random data"
+failures: SGBs that synchronize validate BCH cleanly. On 2026-07-04 the firmin
+relay recovered calibration SGB bursts whose residual offsets were around
++8.6 to +11.1 kHz, outside the previous ±8 kHz search window; the same run
+showed roughly 93 % SGB calibration-slot success on the 150 s grid. Local
+RTL/Yagi validation remained in the same range, and FGB stayed around its
+pre-existing 90 % class. Treat these as run-specific field checks, not fixed
+global rates.
 
 ---
 
@@ -59,7 +85,7 @@ Binaries produced in `build/`:
 | `dec406_iq` | SGB DSSS/OQPSK demodulator from IQ file |
 | `dec406_hex` | 1G/2G decoder from hex string |
 | `dec406_audio` | 1G decoder from WAV file (legacy FM-demod pipeline) |
-| `dec406_scan` | Real-time FGB+SGB band scanner (rtl-sdr) |
+| `dec406_scan` | Real-time FGB+SGB band scanner (Airspy/RTL-SDR/PlutoSDR) |
 | `dec406_dsss_test` | DSSS demodulator unit test driver |
 | `generate_2g_hex` | 2G test frame generator |
 | `reset_usb` | USB device reset utility |
@@ -99,9 +125,29 @@ interleaved, `-I` int32 SDRangel ci32_le.
 ```
 
 The scanner reads samples at 2.4576 Msps, detects bursts on a power
-spectrogram, classifies them by bandwidth (≥ 40 kHz → SGB), and runs the
-appropriate decoder. Each cycle is 55 s; the dongle is then closed,
-USB-reset, and reopened to clear accumulated libusb state.
+spectrogram, classifies them by bandwidth (`BW_SPLIT_HZ = 20 kHz`; wider
+bursts are SGB), and runs the appropriate decoder. On RTL-SDR it resets the
+USB device at startup, then captures continuously through the asynchronous
+librtlsdr API.
+
+Set `RTL_DIAG=1` to log effective RTL throughput every few seconds:
+
+```bash
+RTL_DIAG=1 ./build/dec406_scan 406.0M 406.1M
+```
+
+Useful SGB diagnostics:
+
+```bash
+DSSS_DIAG=1 ./build/dec406_scan 406.0M 406.1M
+DUMP_FAIL=1 ./build/dec406_scan 406.0M 406.1M
+make build/sgb_epl_diag
+```
+
+`DUMP_FAIL=1` writes failed SGB burst windows as `burst_sgb_*.cf32` for
+offline replay. `build/sgb_epl_diag` probes those dumps with EPL
+correlators at wider residual-frequency ranges. `ACQ_BANDPASS_HZ` is kept as
+a diagnostic acquisition-only filter; default `0` leaves it disabled.
 
 #### As a systemd service
 
@@ -173,7 +219,7 @@ Additional silencing filters layered on the channel whitelist:
 IQ @ 2.4576 MHz
   → DC blocker (IIR α=0.001)
   → boxcar decimation to chip rate (acquisition only)
-  → freq_acq_fft_corr (chip-rate FFT-correlation, ~1 Hz precision)
+  → freq_acq_fft_corr (chip-rate FFT-correlation, ±16 kHz, ~1 Hz precision)
   → NCO wipeoff at sample rate
   → OQPSK delay (Q advanced by SPS/2)
   → multi-offset boxcar decimation (4 sub-chip offsets)
@@ -215,8 +261,9 @@ src/         C sources (dsss_demod, despread, freq_acq, fgb_iq_demod,
 include/     Headers
 build/       Compiled binaries
 tests/       SGB codec unit tests, BCH reject tests
+utils/       Offline diagnostic tools
 scripts/     Analysis / debug scripts
-docs/        T.018 specifications, architecture (not on GitHub)
+docs/        Specifications, deployment notes, SGB status notes
 data/        Runtime data (config_mail.txt, etc.)
 ```
 
@@ -229,6 +276,12 @@ data/        Runtime data (config_mail.txt, etc.)
 - `docs/ARCHITECTURE_dec406.md` — Detailed architecture (French)
 - `docs/TESTS_VALIDATION.md` — Validation procedures
 - `scripts/scan406.pl` — Legacy Perl scanner (superseded by dec406_scan)
+
+---
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
 
 ---
 

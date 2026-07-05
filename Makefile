@@ -81,14 +81,43 @@ $(BUILD_DIR)/test_acq_lag: $(UTILS_DIR)/test_acq_lag.c $(SRC_DIR)/freq_acq.c $(S
 	$(CC) $(CFLAGS) -o $@ $^ -lm -lfftw3f
 	@echo "Built: $@"
 
+# sgb_epl_diag - Offline SGB preamble EPL/Prompt diagnostics for cf32 windows
+$(BUILD_DIR)/sgb_epl_diag: $(UTILS_DIR)/sgb_epl_diag.c $(SRC_DIR)/freq_acq.c $(SRC_DIR)/despread.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ -lm -lfftw3f
+	@echo "Built: $@"
+
 # ============================================================================
 # Real-time scanner (unified FGB + SGB)
 # ============================================================================
 
-# dec406_scan - Real-time band scanner (rtl_sdr -> detect/classify -> decode)
-$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
+# Common scanner sources
+SCANNER_SRCS = \
+	$(SRC_DIR)/scanner.c \
+	$(SRC_DIR)/dec406.c \
+	$(SRC_DIR)/dec406_v1g.c \
+	$(SRC_DIR)/dec406_v2g.c \
+	$(SRC_DIR)/display_utils.c \
+	$(SRC_DIR)/fgb_iq_demod.c \
+	$(SRC_DIR)/scan_alert.c \
+	$(DSSS_SRCS)
+
+# dec406_scan - Unified scanner with auto hardware detection (Airspy → RTL-SDR → PlutoSDR)
+$(BUILD_DIR)/dec406_scan: $(SRC_DIR)/main_scan_unified.c $(SRC_DIR)/backend_rtlsdr.c $(SRC_DIR)/backend_airspy.c $(SRC_DIR)/backend_pluto.c $(SCANNER_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DHAVE_RTLSDR -DHAVE_AIRSPY -DHAVE_PLUTO -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr -lairspy -liio
+	@echo "Built: $@ (Airspy + RTL-SDR + PlutoSDR)"
+
+# dec406_scan_rtlsdr - RTL-SDR only (legacy standalone)
+$(BUILD_DIR)/dec406_scan_rtlsdr: $(SRC_DIR)/main_scan.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread -lrtlsdr
+	@echo "Built: $@"
+
+# dec406_scan_airspy - Airspy only (legacy standalone)
+$(BUILD_DIR)/dec406_scan_airspy: $(SRC_DIR)/main_scan_airspy.c $(SRC_DIR)/dec406.c $(SRC_DIR)/dec406_v1g.c $(SRC_DIR)/dec406_v2g.c $(SRC_DIR)/display_utils.c $(SRC_DIR)/audio_capture.c $(SRC_DIR)/fgb_iq_demod.c $(SRC_DIR)/scan_alert.c $(DSSS_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread -lairspy
 	@echo "Built: $@"
 
 # ============================================================================

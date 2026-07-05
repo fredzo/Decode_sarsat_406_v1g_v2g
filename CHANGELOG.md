@@ -1,10 +1,102 @@
 # Changelog - dec406_v10.2
 
-## Version 10.2.7 - 2026-06-14 - SGB 93 %, FGB 92 %
+## Version 10.2.9 - 2026-07-04 - Wider SGB acquisition search
+
+### SGB acquisition search widened to ±16 kHz (`src/dsss_demod.c`)
+
+`freq_acq_fft_corr()` is now called with a ±16 kHz residual-frequency search
+window instead of ±8 kHz. Field dumps from firmin showed valid CNES SGB
+calibration bursts with correlation peaks at roughly +8.6 to +11.1 kHz from
+the scanner burst centroid; the previous search range rejected those bursts
+before despreading even though the signal was usable.
+
+This is an acquisition-only change. The post-sync SGB path remains unchanged:
+NCO wipeoff, OQPSK delay, despread, per-bit Costas, and BCH validation are the
+same as in 10.2.8.
+
+### Offline SGB EPL diagnostic tool (`utils/sgb_epl_diag.c`)
+
+Added `build/sgb_epl_diag` to analyze dumped SGB bursts offline with
+Early/Prompt/Late PRN correlators. The tool was used to separate true
+structure loss from an acquisition search-window miss, and to verify that the
+rejected firmin bursts still had strong prompt correlation outside ±8 kHz.
+
+### Validation update
+
+2026-07-04 local and firmin logs were rechecked on the 150 s CNES calibration
+grid after the wider acquisition search:
+
+- firmin: about 93 % SGB calibration-slot success in the checked post-fix
+  window; recovered bursts had residual offsets outside the old ±8 kHz range;
+- local RTL/Yagi: remained in the same high-success range, with no regression
+  from the acquisition change;
+- FGB: no regression observed; still in the pre-existing ~90 % field class;
+- BCH/frame rejects: no return of the earlier "strong preamble, random data"
+  failure mode.
+
+The acquisition-only Butterworth filter remains available through
+`ACQ_BANDPASS_HZ` for experiments, but the default is disabled (`0`).
+
+## Version 10.2.8 - 2026-07-04 - Unified scanner, RTL async, cautious rate accounting
+
+### Real-time scanner unified on `main`
+
+`dec406_scan` now uses the unified scanner architecture with automatic backend
+selection (Airspy Mini, RTL-SDR, PlutoSDR). The scanner reports the selected
+gain and backend parameter (`ppm` for RTL-SDR) at startup.
+
+### RTL-SDR asynchronous capture (`src/backend_rtlsdr.c`)
+
+The RTL-SDR backend now uses `rtlsdr_read_async()` with 32 large buffers.
+This replaces the synchronous capture loop, which could silently underfeed the
+scanner and introduce sample discontinuities before the ring buffer. Local
+RTL/Yagi validation showed the effective throughput returning to nominal
+2.4576 MS/s and removed the failure mode where SGB had a strong preamble sync
+but random payload bits.
+
+`RTL_DIAG=1` enables periodic throughput logs; it is silent by default for
+systemd operation.
+
+### Fredzo SGB detection fixes integrated
+
+Integrated the relevant fixes from fredzo's `bch2_correction` branch, adapted
+to the unified scanner:
+
+- reject degenerate all-zero/all-one SGB codewords before BCH acceptance;
+- reject trivial BCH success after a false despread lock;
+- cap `freq_acq_fft_corr()` lag search to the burst pre-roll region so late
+  data/noise peaks cannot beat the true preamble.
+
+### Rate accounting correction
+
+Older changelog entries quote short-window headline rates such as "SGB 93 %"
+and "FGB 92 %". Those numbers are **not stable global performance figures**:
+they depend on propagation, time of day, local noise, active CNES beacons, and
+scanner filtering. Current reporting should keep SGB buckets separate:
+
+| Metric | Definition |
+|---|---|
+| SGB acquisition/sync | `(BCH OK + FRAME REJECTED) / detected SGB bursts` |
+| SGB decoder purity | `BCH OK / (BCH OK + FRAME REJECTED)` |
+| SGB end-to-end | `BCH OK / detected SGB bursts` |
+
+Recent validation after this update:
+
+- local RTL/Yagi: no return of the "strong preamble, random payload" failure;
+  SGBs that synchronize validate BCH cleanly, while remaining misses are mostly
+  `coarse reject conf ...` acquisition failures;
+- firmin: early post-deploy sample is too short and propagation-dependent for
+  a headline percentage. BCH rejects disappeared in the short post-deploy
+  sample, but acquisition rejects remain the dominant SGB loss bucket.
+
+## Version 10.2.7 - 2026-06-14 - SGB chain fixes (short-window rates obsolete)
 
 ### SGB decode chain fixes (`src/despread.c`, `src/dec406_v2g.c`, `src/dsss_demod.c`)
 
-Three bugs fixed simultaneously, taking SGB from 29 % to 93 % at firmin (80 km):
+Three bugs fixed simultaneously. In the short validation window available at
+the time this looked like a 29 % → 93 % improvement at firmin (80 km), but
+that headline rate is now considered obsolete; see 10.2.8 for bucket-based
+rate accounting.
 
 1. **Bit polarity inversion** — T.018: data=1 inverts the PRN, so correlation
    with raw PRN is negative. Decision was `> 0` instead of `< 0`, causing all
@@ -31,7 +123,10 @@ error count for diagnostics.
 `DUMP_FAIL=1` environment variable dumps failed SGB bursts to
 `burst_sgb_HHMMSS_<freq>Hz.cf32` (float32 complex) for offline analysis.
 
-### Decode rates at firmin relay (80 km, evening propagation)
+### Historical short-window decode rates at firmin relay (80 km, evening propagation)
+
+These values are kept for historical context only. They should not be used as
+current global performance claims.
 
 | Type | Before | After |
 |------|--------|-------|

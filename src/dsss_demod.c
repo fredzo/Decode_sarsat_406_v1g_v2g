@@ -10,6 +10,7 @@
  * Chain:
  *   ota_buffer
  *     → DC blocker (IIR α=0.001)
+ *     → optional acquisition-only low-pass at sample rate
  *     → boxcar decimation to chip rate (un-delayed, for acquisition only)
  *     → freq_acq_fft_corr (chip-rate FFT-correlation)
  *     → NCO wipeoff at sample rate
@@ -28,7 +29,7 @@
 #include "diag_log.h"
 
 /* Provided by dec406_v2g.c */
-extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out);
+extern int bch_decode_250_202(const uint8_t *msg, uint8_t *out, uint8_t *cw_out);
 extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
                                    int *n_errors);
 
@@ -44,6 +45,62 @@ extern int bch_decode_250_202_nerr(const uint8_t *msg, uint8_t *out,
 /* Minimum confidence from freq_acq_fft_corr to accept the acquisition.
  * Empirically: real OTA locks give 40+, pure-noise picks give 2-4. */
 #define ACQ_CONF_MIN 8.0f
+
+/* Acquisition-only low-pass cutoff before chip-rate boxcar decimation.
+ * Disabled by default; set ACQ_BANDPASS_HZ=45000 for A/B diagnostics. */
+#define ACQ_BANDPASS_HZ 0.0f
+
+typedef struct {
+    float b0, b1, b2;
+    float a1, a2;
+    float z1_i, z2_i;
+    float z1_q, z2_q;
+} biquad_t;
+
+static void biquad_init_lowpass(biquad_t *bq, float cutoff_hz,
+                                float fs, float q)
+{
+    float k = tanf((float)M_PI * cutoff_hz / fs);
+    float k2 = k * k;
+    float norm = 1.0f / (1.0f + k / q + k2);
+
+    bq->b0 = k2 * norm;
+    bq->b1 = 2.0f * bq->b0;
+    bq->b2 = bq->b0;
+    bq->a1 = 2.0f * (k2 - 1.0f) * norm;
+    bq->a2 = (1.0f - k / q + k2) * norm;
+    bq->z1_i = bq->z2_i = 0.0f;
+    bq->z1_q = bq->z2_q = 0.0f;
+}
+
+static float biquad_process_real(biquad_t *bq, float x,
+                                 float *z1, float *z2)
+{
+    float y = bq->b0 * x + *z1;
+    *z1 = bq->b1 * x - bq->a1 * y + *z2;
+    *z2 = bq->b2 * x - bq->a2 * y;
+    return y;
+}
+
+static void acq_lowpass(float complex *samples, size_t n,
+                        float cutoff_hz, float fs)
+{
+    biquad_t s1, s2;
+    biquad_init_lowpass(&s1, cutoff_hz, fs, 0.5411961f);
+    biquad_init_lowpass(&s2, cutoff_hz, fs, 1.3065630f);
+
+    for (size_t k = 0; k < n; k++) {
+        float i = __real__ samples[k];
+        float q = __imag__ samples[k];
+
+        i = biquad_process_real(&s1, i, &s1.z1_i, &s1.z2_i);
+        q = biquad_process_real(&s1, q, &s1.z1_q, &s1.z2_q);
+        i = biquad_process_real(&s2, i, &s2.z1_i, &s2.z2_i);
+        q = biquad_process_real(&s2, q, &s2.z1_q, &s2.z2_q);
+
+        samples[k] = i + q * I;
+    }
+}
 
 /* In-place NCO carrier wipeoff at sample rate. */
 static void nco_wipe(float complex *samples, size_t n,
@@ -70,12 +127,17 @@ static void nco_wipe(float complex *samples, size_t n,
 /* Boxcar decimation: integrate isps samples per chip, starting at
  * sample offset 'offset' within each chip period. */
 static void boxcar_decimate_off(const float complex *in, size_t N,
-                                int isps, int offset,
+                                float sps, int offset,
                                 float complex *out, size_t n_chips)
 {
+    int isps = (int)(sps + 0.5f);
     for (size_t k = 0; k < n_chips; k++) {
         float complex acc = 0.0f;
-        size_t base = k * (size_t)isps + (size_t)offset;
+        /* Fractional chip stride: place each chip at round(k*sps)+offset so
+         * non-integer samples-per-chip (e.g. 78.125 at 3 MSPS) does not drift
+         * across the burst. At an integer sps (64 @ 2.4576 MSPS) this is
+         * identical to the old k*isps. */
+        size_t base = (size_t)((double)k * sps + (double)offset + 0.5);
         for (int j = 0; j < isps; j++) {
             size_t idx = base + (size_t)j;
             if (idx < N) acc += in[idx];
@@ -85,9 +147,9 @@ static void boxcar_decimate_off(const float complex *in, size_t N,
 }
 
 static void boxcar_decimate(const float complex *in, size_t N,
-                            int isps, float complex *out, size_t n_chips)
+                            float sps, float complex *out, size_t n_chips)
 {
-    boxcar_decimate_off(in, N, isps, 0, out, n_chips);
+    boxcar_decimate_off(in, N, sps, 0, out, n_chips);
 }
 
 /* A despread that locks onto noise (or onto a wrong boxcar offset) often
@@ -131,10 +193,11 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     int isps = (int)(sps + 0.5f);
     size_t N = buffer_length;
-    size_t n_chips = N / (size_t)isps;
+    size_t n_chips = (size_t)((double)N / sps);
 
     int rc = -1;
-    float complex *work  = (float complex *)malloc(N * sizeof(float complex));
+    float complex *work = (float complex *)malloc(N * sizeof(float complex));
+    float complex *acq_work = NULL;
     float complex *chips = (float complex *)calloc(n_chips, sizeof(float complex));
     if (!work || !chips) {
         DIAG("[dsss_demod] allocation failure\n");
@@ -154,10 +217,30 @@ int dsss_receive_burst(const float complex *ota_buffer,
         }
     }
 
+    float acq_bandpass_hz = ACQ_BANDPASS_HZ;
+    { const char *e = getenv("ACQ_BANDPASS_HZ");
+      if (e) acq_bandpass_hz = (float)atof(e); }
+    if (acq_bandpass_hz > 0.0f) {
+        float nyq = 0.5f * fs;
+        if (acq_bandpass_hz >= nyq)
+            acq_bandpass_hz = 0.0f;
+    }
+    if (acq_bandpass_hz > 0.0f) {
+        acq_work = (float complex *)malloc(N * sizeof(float complex));
+        if (!acq_work) {
+            DIAG("[dsss_demod] acquisition filter allocation failure\n");
+            goto cleanup;
+        }
+        memcpy(acq_work, work, N * sizeof(float complex));
+        acq_lowpass(acq_work, N, acq_bandpass_hz, fs);
+        DIAG("[dsss_demod] acquisition bandpass %.0f Hz\n",
+             (double)acq_bandpass_hz);
+    }
+
     /* 2. Coarse acquisition: boxcar to chip rate on the un-delayed,
      *    still-rotating signal. fft-corr internally rotates the chips at
      *    each test frequency to find the best (freq, lag, phase). */
-    boxcar_decimate(work, N, isps, chips, n_chips);
+    boxcar_decimate(acq_work ? acq_work : work, N, sps, chips, n_chips);
 
     /* Cap n_chips at 12000 for acquisition: empirically (see archive
      * dsss_demod_20260522.c) freq_acq_fft_corr's last_lag = n_chips -
@@ -182,23 +265,84 @@ int dsss_receive_burst(const float complex *ota_buffer,
     if (acq_max_lag > n_chips_acq - 1024)
         acq_max_lag = n_chips_acq - 1024;
 
+    float acq_conf_min = ACQ_CONF_MIN;
+    { const char *e = getenv("ACQ_CONF_MIN");
+      if (e) acq_conf_min = (float)atof(e); }
+
     freq_acq_result_t acq;
     memset(&acq, 0, sizeof(acq));
+    /* +/-16 kHz: the scanner's burst centroid was measured off by up to
+     * 9.5 kHz (a spectral mean pulled by in-band noise/interference), which
+     * pushed the post-mix residual outside the former +/-8 kHz window and
+     * made healthy bursts unacquirable (conf ~2). Upper bound is the
+     * chip-rate boxcar fold-over at +/-19.2 kHz. */
     if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
-                          -8000.0f, 8000.0f, acq_max_lag, &acq) != 0 ||
-        acq.confidence < ACQ_CONF_MIN) {
+                          -16000.0f, 16000.0f, acq_max_lag, &acq) != 0 ||
+        acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
              (double)acq.freq_hz, (double)acq.confidence,
-             (double)ACQ_CONF_MIN);
+             (double)acq_conf_min);
         goto cleanup;
+    }
+
+    /* 3a. Frequency refinement against despread_sync's narrow preamble response.
+     * freq_acq maximises its own correlation, whose optimum sits 5-7 Hz off
+     * despread_sync's. The preamble response is sharp (~+/-10 Hz to half-max,
+     * zero beyond +/-15 Hz), so that offset can collapse sync (z=0) even with
+     * high freq_acq confidence. The refinement must mirror the real despread
+     * path (wipeoff + OQPSK + decimate), so process the buffer once at
+     * acq.freq, then probe +/-15 Hz by chip-rate derotation (the OQPSK-phase
+     * error across that span is ~1e-3 rad, negligible). */
+    {
+        float complex *tmp = (float complex *)malloc(N * sizeof(float complex));
+        float complex *c0   = (float complex *)malloc(n_chips * sizeof(float complex));
+        float complex *dr   = (float complex *)malloc(n_chips * sizeof(float complex));
+        if (tmp && c0 && dr) {
+            memcpy(tmp, work, N * sizeof(float complex));
+            nco_wipe(tmp, N, acq.freq_hz, fs);
+            if (getenv("NO_OQPSK") == NULL) {
+                int delay = isps / 2;
+                for (size_t t = 0; t < N; t++) {
+                    float r = __real__ tmp[t];
+                    float q = (t + (size_t)delay < N)
+                                ? __imag__ tmp[t + (size_t)delay] : 0.0f;
+                    tmp[t] = r + q * I;
+                }
+            }
+            boxcar_decimate(tmp, N, sps, c0, n_chips);
+
+            float best_f = acq.freq_hz, best_z = -1.0f;
+            for (int df = -15; df <= 15; df += 5) {
+                float dphi = -2.0f * (float)M_PI * (float)df / chip_rate;
+                float pr = 1.0f, pi = 0.0f;
+                float sr = cosf(dphi), si = sinf(dphi);
+                for (size_t k = 0; k < n_chips; k++) {
+                    float re = __real__ c0[k], im = __imag__ c0[k];
+                    dr[k] = (re * pr - im * pi) + (re * pi + im * pr) * I;
+                    float nr = pr * sr - pi * si, ni = pr * si + pi * sr;
+                    pr = nr; pi = ni;
+                }
+                despread_sync_t s;
+                despread_sync(dr, (int)n_chips, &s);
+                if (s.z_comb > best_z) { best_z = s.z_comb;
+                                         best_f = acq.freq_hz + (float)df; }
+            }
+            if (best_f != acq.freq_hz)
+                DIAG("[dsss_demod] freq refined %.0f -> %.0f Hz (z=%.1f)\n",
+                     (double)acq.freq_hz, (double)best_f, (double)best_z);
+            acq.freq_hz = best_f;
+        }
+        free(tmp); free(c0); free(dr);
     }
 
     /* 3. NCO carrier wipeoff at sample rate on the full-rate buffer. */
     nco_wipe(work, N, acq.freq_hz, fs);
 
-    /* 4. OQPSK delay: advance Q by SPS/2 (safe now that the carrier is wiped). */
-    {
+    /* 4. OQPSK delay: advance Q by SPS/2 (safe now that the carrier is wiped).
+     * Diagnostic toggle NO_OQPSK=1 bypasses this to test whether the fixed
+     * half-chip shift mismatches the burst's sub-chip phase. */
+    if (getenv("NO_OQPSK") == NULL) {
         int delay = isps / 2;
         for (size_t t = 0; t < N; t++) {
             float r = __real__ work[t];
@@ -225,10 +369,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
         int best_nerr = 99;
         for (int oi = 0; oi < n_offsets; oi++) {
-            size_t n_chips_off = (N - (size_t)offsets[oi]) / (size_t)isps;
+            size_t n_chips_off = (size_t)((double)(N - (size_t)offsets[oi]) / sps);
             if (n_chips_off < 6400) continue;
 
-            boxcar_decimate_off(work, N, isps, offsets[oi],
+            boxcar_decimate_off(work, N, sps, offsets[oi],
                                 chips, n_chips_off);
 
             despread_sync_t sync;
@@ -278,7 +422,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
             DIAG("[dsss_demod] BCH FAIL all 16 combos, best nerr=%d\n",
                  best_nerr);
             /* Fallback: re-decimate at offset 0, return best-effort bits. */
-            boxcar_decimate(work, N, isps, chips, n_chips);
+            boxcar_decimate(work, N, sps, chips, n_chips);
             despread_sync_t sync;
             if (despread_sync(chips, (int)n_chips, &sync) == 0) {
                 rc = despread_bits(chips, (int)n_chips, &sync,
@@ -374,6 +518,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
     }
 
 cleanup:
+    free(acq_work);
     free(work);
     free(chips);
     return rc;
