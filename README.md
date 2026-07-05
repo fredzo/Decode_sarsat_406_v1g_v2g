@@ -68,6 +68,8 @@ sudo apt update
 sudo apt install libfftw3-dev
 sudo apt install libfftw3f-dev
 sudo apt install librtlsdr-dev
+sudo apt install libairspy-dev
+sudo apt install libiio-dev
 ```
 
 ## Build
