@@ -330,7 +330,15 @@ typedef struct {
     
     uint8_t raw_data[202];  // Store raw data for validation
     char corrected_hex[64]; // Corrected 250-bit codeword as hex (post-BCH)
+    uint8_t frame_is_self_test;
 } BeaconInfo;
+
+static int g_decode_2g_is_self_test = 0;
+
+void decode_2g_set_mode(int is_self_test)
+{
+    g_decode_2g_is_self_test = is_self_test ? 1 : 0;
+}
 
 // ===================================================
 // Utility Functions
@@ -750,6 +758,7 @@ void decode_2g(const uint8_t *rx_bits) {
     uint8_t cw250[250];        // Full corrected codeword (202 data + 48 BCH)
     BeaconInfo info;
     memset(&info, 0, sizeof(info));
+    info.frame_is_self_test = (uint8_t)(g_decode_2g_is_self_test ? 1 : 0);
 
     /* Diagnostic (DSSS_DIAG): emit a marker matching the despread_bits.c
      * burst counter so the post-hoc analyzer can match a BCH outcome
@@ -794,6 +803,10 @@ void decode_2g(const uint8_t *rx_bits) {
             int j = 4 * k + b - 2;  // shift for the 2-bit left pad
             int bit = (j >= 0 && j < 250) ? (cw250[j] & 1) : 0;
             nib |= bit << (3 - b);
+            if(k==0 && b==0 && info.frame_is_self_test) {
+                // Set bit 4 (first bit of first nibble) to 1 for self-test
+                nib |= 0x8;
+            }
         }
         info.corrected_hex[k] = "0123456789ABCDEF"[nib];
     }
@@ -819,6 +832,10 @@ void decode_2g(const uint8_t *rx_bits) {
     
     // 8. Print decoded information
     print_beacon_info(&info);
+
+    /* One-shot mode context: callers that do not explicitly set mode
+     * should not inherit the previous frame classification. */
+    g_decode_2g_is_self_test = 0;
 }
 
 // ===================================================
@@ -835,6 +852,7 @@ void print_beacon_info(const BeaconInfo *info) {
     char coord_buf[50];
     
     printf("\n=== 406 MHz SECOND GENERATION BEACON (SGB) ===");
+    printf("\n Frame Mode: %s", info->frame_is_self_test ? "Self-test" : "Normal");
     printf("\n[IDENTIFICATION]");
     printf("\n 23 Hex ID: %s", info->hex_id);
     printf("\n Corrected 250 bits: %s", info->corrected_hex);

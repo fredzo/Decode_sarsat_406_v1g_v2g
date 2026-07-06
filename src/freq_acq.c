@@ -503,11 +503,13 @@ static int cmp_float_asc(const void *a, const void *b) {
 #define FFTC_FINE_HZ    1.0f   /* fine freq step */
 #define FFTC_FINE_RANGE 18.0f  /* fine search half-range around the coarse peak */
 
-int freq_acq_fft_corr(const float complex *chips, int n_chips,
-                      float chip_rate,
-                      float freq_min, float freq_max,
-                      int max_lag,
-                      freq_acq_result_t *result)
+int freq_acq_fft_corr_seeded(const float complex *chips, int n_chips,
+                             float chip_rate,
+                             float freq_min, float freq_max,
+                             int max_lag,
+                             uint32_t prn_seed_i,
+                             uint32_t prn_seed_q,
+                             freq_acq_result_t *result)
 {
     if (!chips || !result || chip_rate <= 0.0f)
         return -1;
@@ -535,8 +537,8 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
     }
 
     /* Reference: preamble PRN → expected I/Q chip values (±1). */
-    despread_gen_prn(DESPREAD_PRN_SEED_I, FFTC_PRN_LEN, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, FFTC_PRN_LEN, prn_q);
+    despread_gen_prn(prn_seed_i, FFTC_PRN_LEN, prn_i);
+    despread_gen_prn(prn_seed_q, FFTC_PRN_LEN, prn_q);
     for (int k = 0; k < FFTC_PRN_LEN; k++) {
         ei[k] = 1.0f - 2.0f * (float)prn_i[k];
         eq[k] = 1.0f - 2.0f * (float)prn_q[k];
@@ -706,4 +708,17 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
             (double)peak_pwr, (double)median, (double)mean, best_phase);
 
     return 0;
+}
+
+int freq_acq_fft_corr(const float complex *chips, int n_chips,
+                      float chip_rate,
+                      float freq_min, float freq_max,
+                      int max_lag,
+                      freq_acq_result_t *result)
+{
+    return freq_acq_fft_corr_seeded(chips, n_chips, chip_rate,
+                                    freq_min, freq_max, max_lag,
+                                    DESPREAD_PRN_SEED_I,
+                                    DESPREAD_PRN_SEED_Q,
+                                    result);
 }

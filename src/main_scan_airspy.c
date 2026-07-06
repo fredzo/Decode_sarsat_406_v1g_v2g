@@ -160,6 +160,32 @@ static char *capture_decode(decode_print_fn fn, const uint8_t *bits, int n) {
   return buf;
 }
 
+static char *capture_decode_2g(const uint8_t *bits, int n, int is_self_test) {
+  (void)n;
+  fflush(stdout);
+  FILE *tmp = tmpfile();
+  if (!tmp) { decode_2g_set_mode(is_self_test); decode_2g(bits); return NULL; }
+  int saved = dup(STDOUT_FILENO);
+  if (saved < 0) { fclose(tmp); decode_2g_set_mode(is_self_test); decode_2g(bits); return NULL; }
+  dup2(fileno(tmp), STDOUT_FILENO);
+  decode_2g_set_mode(is_self_test);
+  decode_2g(bits);
+  fflush(stdout);
+  dup2(saved, STDOUT_FILENO);
+  close(saved);
+  fseek(tmp, 0, SEEK_END);
+  long sz = ftell(tmp);
+  rewind(tmp);
+  char *buf = (sz >= 0) ? malloc((size_t)sz + 1) : NULL;
+  if (buf) {
+    size_t nread = fread(buf, 1, (size_t)sz, tmp);
+    buf[nread] = '\0';
+    fputs(buf, stdout);
+  }
+  fclose(tmp);
+  return buf;
+}
+
 static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double snr_db) {
   uint64_t head = (uint64_t)(0.20 * samp_rate);
   uint64_t tail = (uint64_t)(0.20 * samp_rate);
@@ -190,13 +216,16 @@ static void decode_sgb(uint64_t start, uint64_t len, double offset_hz, double sn
   uint8_t bits[DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS];
   memset(bits, 0, sizeof bits);
   float z = 0.0f;
+  int is_self_test = 0;
   float fs = (float)samp_rate;
-  int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0, bits, &z);
+  int rc = dsss_receive_burst(win, (size_t)ext_len, fs / 38400.0f, fs, 0,
+                              bits, &z, &is_self_test);
 
   if (rc == 0) {
     free(win);
     printf("  --- SGB frame decoded (z=%.1f) ---\n", z);
-    char *body = capture_decode(decode_beacon, bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS);
+    char *body = capture_decode_2g(bits, DSSS_PAYLOAD_BITS + DSSS_PARITY_BITS,
+                     is_self_test);
     double freq_mhz = (g_center_hz + offset_hz) / 1e6;
     int is_real_distress = (body && strstr(body, "Test Protocol: Normal Operation") != NULL);
     const char *hex_id = scan_alert_extract_hex_id(body);

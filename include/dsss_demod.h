@@ -27,6 +27,12 @@
 #define DSSS_SAMP_RATE_HZ       2457600    /* 2.4576 MHz (SPS=64) */
 #define DSSS_SPS                64
 
+/* T.018 PRN seeds for SGB DSSS preamble. */
+#define DSSS_PRN_SEED_I_NORMAL     0x000001UL
+#define DSSS_PRN_SEED_Q_NORMAL     0x1AC1FCUL
+#define DSSS_PRN_SEED_I_SELFTEST   0x52C9F0UL
+#define DSSS_PRN_SEED_Q_SELFTEST   0x3CE928UL
+
 /* Frame structure (per T.018 §2.2.3). */
 #define DSSS_PREAMBLE_BITS      50         /* total preamble (25 I + 25 Q) */
 #define DSSS_PAYLOAD_BITS       202        /* information bits */
@@ -44,6 +50,8 @@
  * @param output_bits   Output buffer of 250 bytes (each is a bit, 0 or 1)
  *                      ready to feed decode_2g().
  * @param z_score       If non-NULL, receives combined z-score from despread sync.
+ * @param is_self_test  If non-NULL, set to 0 for normal PRN frame,
+ *                      1 for self-test PRN frame.
  *
  * @return 0 on success; -1 on parameter error or sync failure.
  */
@@ -53,6 +61,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
                        float fs,
                        int max_doppler,
                        uint8_t *output_bits,
-                       float *z_score);
+                       float *z_score,
+                       int *is_self_test);
 
 #endif /* DSSS_DEMOD_H */

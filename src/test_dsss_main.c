@@ -195,7 +195,10 @@ int main(int argc, char *argv[]) {
 
     // Run DSSS demodulator
     printf("\n=== Starting DSSS Demodulation ===\n");
-    int result = dsss_receive_burst(samples, num_samples, sps, fs, max_doppler, output_bits, NULL);
+    int is_self_test = 0;
+    int result = dsss_receive_burst(samples, num_samples, sps, fs,
+                                    max_doppler, output_bits, NULL,
+                                    &is_self_test);
 
     if (result != 0) {
         fprintf(stderr, "\nERROR: Demodulation failed\n");
@@ -215,7 +218,7 @@ int main(int argc, char *argv[]) {
 
     // Call 2G decoder
     printf("\n=== Decoding 2G Message ===\n");
-    extern void decode_2g(const uint8_t *rx_bits);
+    decode_2g_set_mode(is_self_test);
     decode_2g(output_bits);
 
     // Cleanup

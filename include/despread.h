@@ -101,6 +101,15 @@ int despread_sync(const float complex *samples, int num_chips,
                   despread_sync_t *sync);
 
 /**
+ * @brief Preamble sync with explicit PRN seeds (normal vs self-test frame).
+ *
+ * @return 0 on success, -1 if no sync above threshold.
+ */
+int despread_sync_seeded(const float complex *samples, int num_chips,
+                         uint32_t prn_seed_i, uint32_t prn_seed_q,
+                         despread_sync_t *sync);
+
+/**
  * @brief Phase-tracking control for despread_bits.
  *
  * freq_init : initial freq_per_bit value (rad/bit).
@@ -138,6 +147,18 @@ int despread_bits(const float complex *samples, int num_chips,
                   uint8_t *output_bits);
 
 /**
+ * @brief Despread message bits using explicit PRN seeds.
+ *
+ * @return 0 on success (250 bits written), -1 on error.
+ */
+int despread_bits_seeded(const float complex *samples, int num_chips,
+                         uint32_t prn_seed_i, uint32_t prn_seed_q,
+                         const despread_sync_t *sync,
+                         const despread_pll_cfg_t *pll_cfg,
+                         despread_metrics_t *metrics,
+                         uint8_t *output_bits);
+
+/**
  * @brief Despread a chip-rate complex stream into 250 message bits.
  *
  * Convenience wrapper: calls despread_sync() then despread_bits().
@@ -149,5 +170,14 @@ int despread_bits(const float complex *samples, int num_chips,
  */
 int despread_burst(const float complex *samples, int num_chips,
                    uint8_t *output_bits, float *z_score);
+
+/**
+ * @brief Despread burst with explicit PRN seeds.
+ *
+ * @return 0 on success, -1 if sync failed.
+ */
+int despread_burst_seeded(const float complex *samples, int num_chips,
+                          uint32_t prn_seed_i, uint32_t prn_seed_q,
+                          uint8_t *output_bits, float *z_score);
 
 #endif /* DESPREAD_H */

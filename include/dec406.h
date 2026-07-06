@@ -18,13 +18,14 @@
 #define DEC406_H
 
 #include <stdint.h>
-
 #define FRAME_1G_SHORT 112
 #define FRAME_1G_LONG 144
 #define FRAME_2G_LENGTH 250
 
 void decode_1g(const uint8_t *bits, int length);
 void decode_2g(const uint8_t *bits);
+void decode_2g_set_mode(int is_self_test);
+
 void decode_beacon(const uint8_t *bits, int length);
 
 #endif

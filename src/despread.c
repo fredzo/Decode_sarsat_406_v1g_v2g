@@ -53,8 +53,9 @@ static void build_expected(const int8_t *pred_i, const int8_t *pred_q,
     }
 }
 
-int despread_sync(const float complex *samples, int num_chips,
-                  despread_sync_t *sync)
+int despread_sync_seeded(const float complex *samples, int num_chips,
+                         uint32_t prn_seed_i, uint32_t prn_seed_q,
+                         despread_sync_t *sync)
 {
     if (samples == NULL || sync == NULL ||
         num_chips < DESPREAD_PREAMBLE_CHIPS + DESPREAD_SYNC_RANGE)
@@ -70,8 +71,8 @@ int despread_sync(const float complex *samples, int num_chips,
         free(prn_i); free(prn_q); free(npi); free(npq);
         return -1;
     }
-    despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PREAMBLE_CHIPS, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PREAMBLE_CHIPS, prn_q);
+    despread_gen_prn(prn_seed_i, DESPREAD_PREAMBLE_CHIPS, prn_i);
+    despread_gen_prn(prn_seed_q, DESPREAD_PREAMBLE_CHIPS, prn_q);
     chip_not(prn_i, DESPREAD_PREAMBLE_CHIPS, npi);
     chip_not(prn_q, DESPREAD_PREAMBLE_CHIPS, npq);
 
@@ -261,11 +262,21 @@ int despread_sync(const float complex *samples, int num_chips,
     return 0;
 }
 
-int despread_bits(const float complex *samples, int num_chips,
-                  const despread_sync_t *sync,
-                  const despread_pll_cfg_t *pll_cfg,
-                  despread_metrics_t *metrics,
-                  uint8_t *output_bits)
+int despread_sync(const float complex *samples, int num_chips,
+                  despread_sync_t *sync)
+{
+    return despread_sync_seeded(samples, num_chips,
+                                DESPREAD_PRN_SEED_I,
+                                DESPREAD_PRN_SEED_Q,
+                                sync);
+}
+
+int despread_bits_seeded(const float complex *samples, int num_chips,
+                         uint32_t prn_seed_i, uint32_t prn_seed_q,
+                         const despread_sync_t *sync,
+                         const despread_pll_cfg_t *pll_cfg,
+                         despread_metrics_t *metrics,
+                         uint8_t *output_bits)
 {
     if (samples == NULL || sync == NULL || output_bits == NULL)
         return -1;
@@ -278,8 +289,8 @@ int despread_bits(const float complex *samples, int num_chips,
     int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
     int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
     if (!prn_i || !prn_q) { free(prn_i); free(prn_q); return -1; }
-    despread_gen_prn(DESPREAD_PRN_SEED_I, DESPREAD_PRN_LEN, prn_i);
-    despread_gen_prn(DESPREAD_PRN_SEED_Q, DESPREAD_PRN_LEN, prn_q);
+    despread_gen_prn(prn_seed_i, DESPREAD_PRN_LEN, prn_i);
+    despread_gen_prn(prn_seed_q, DESPREAD_PRN_LEN, prn_q);
 
     /* Phase tracking: 2nd-order (proportional + integral).
      * alpha corrects phase; beta accumulates the per-bit phase drift
@@ -453,14 +464,40 @@ int despread_bits(const float complex *samples, int num_chips,
     return (out_idx == DESPREAD_OUTPUT_BITS) ? 0 : -1;
 }
 
-int despread_burst(const float complex *samples, int num_chips,
-                   uint8_t *output_bits, float *z_score)
+int despread_bits(const float complex *samples, int num_chips,
+                  const despread_sync_t *sync,
+                  const despread_pll_cfg_t *pll_cfg,
+                  despread_metrics_t *metrics,
+                  uint8_t *output_bits)
+{
+    return despread_bits_seeded(samples, num_chips,
+                                DESPREAD_PRN_SEED_I,
+                                DESPREAD_PRN_SEED_Q,
+                                sync, pll_cfg, metrics, output_bits);
+}
+
+int despread_burst_seeded(const float complex *samples, int num_chips,
+                          uint32_t prn_seed_i, uint32_t prn_seed_q,
+                          uint8_t *output_bits, float *z_score)
 {
     despread_sync_t sync;
-    if (despread_sync(samples, num_chips, &sync) != 0)
+    if (despread_sync_seeded(samples, num_chips,
+                             prn_seed_i, prn_seed_q,
+                             &sync) != 0)
         return -1;
     if (z_score) {
         *z_score = sync.z_comb;
     }
-    return despread_bits(samples, num_chips, &sync, NULL, NULL, output_bits);
+    return despread_bits_seeded(samples, num_chips,
+                                prn_seed_i, prn_seed_q,
+                                &sync, NULL, NULL, output_bits);
+}
+
+int despread_burst(const float complex *samples, int num_chips,
+                   uint8_t *output_bits, float *z_score)
+{
+    return despread_burst_seeded(samples, num_chips,
+                                 DESPREAD_PRN_SEED_I,
+                                 DESPREAD_PRN_SEED_Q,
+                                 output_bits, z_score);
 }

@@ -166,13 +166,15 @@ static int bits_degenerate(const uint8_t *bits, int n)
     return (ones == 0 || ones == n);
 }
 
-int dsss_receive_burst(const float complex *ota_buffer,
-                       size_t buffer_length,
-                       float sps,
-                       float fs,
-                       int max_doppler,
-                       uint8_t *output_bits,
-                       float *z_score)
+static int dsss_receive_burst_mode(const float complex *ota_buffer,
+                                   size_t buffer_length,
+                                   float sps,
+                                   float fs,
+                                   int max_doppler,
+                                   uint32_t prn_seed_i,
+                                   uint32_t prn_seed_q,
+                                   uint8_t *output_bits,
+                                   float *z_score)
 {
     (void)max_doppler;
 
@@ -276,8 +278,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
      * pushed the post-mix residual outside the former +/-8 kHz window and
      * made healthy bursts unacquirable (conf ~2). Upper bound is the
      * chip-rate boxcar fold-over at +/-19.2 kHz. */
-    if (freq_acq_fft_corr(chips, n_chips_acq, chip_rate,
-                          -16000.0f, 16000.0f, acq_max_lag, &acq) != 0 ||
+    if (freq_acq_fft_corr_seeded(chips, n_chips_acq, chip_rate,
+                                 -16000.0f, 16000.0f, acq_max_lag,
+                                 prn_seed_i, prn_seed_q,
+                                 &acq) != 0 ||
         acq.confidence < acq_conf_min) {
         DIAG("[dsss_demod] acquisition rejected "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
@@ -324,7 +328,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                     pr = nr; pi = ni;
                 }
                 despread_sync_t s;
-                despread_sync(dr, (int)n_chips, &s);
+                despread_sync_seeded(dr, (int)n_chips,
+                                     prn_seed_i, prn_seed_q, &s);
                 if (s.z_comb > best_z) { best_z = s.z_comb;
                                          best_f = acq.freq_hz + (float)df; }
             }
@@ -376,7 +381,8 @@ int dsss_receive_burst(const float complex *ota_buffer,
                                 chips, n_chips_off);
 
             despread_sync_t sync;
-            if (despread_sync(chips, (int)n_chips_off, &sync) != 0)
+            if (despread_sync_seeded(chips, (int)n_chips_off,
+                                     prn_seed_i, prn_seed_q, &sync) != 0)
                 continue;
 
             if (oi == 0 && z_score)
@@ -387,8 +393,10 @@ int dsss_receive_burst(const float complex *ota_buffer,
             int original_phase = sync.phase;
             for (int p = 0; p < 4; p++) {
                 sync.phase = p;
-                if (despread_bits(chips, (int)n_chips_off, &sync,
-                                 NULL, NULL, output_bits) != 0)
+                if (despread_bits_seeded(chips, (int)n_chips_off,
+                                         prn_seed_i, prn_seed_q,
+                                         &sync, NULL, NULL,
+                                         output_bits) != 0)
                     continue;
                 int nerr = -1;
                 int brc = bch_decode_250_202_nerr(output_bits,
@@ -424,9 +432,12 @@ int dsss_receive_burst(const float complex *ota_buffer,
             /* Fallback: re-decimate at offset 0, return best-effort bits. */
             boxcar_decimate(work, N, sps, chips, n_chips);
             despread_sync_t sync;
-            if (despread_sync(chips, (int)n_chips, &sync) == 0) {
-                rc = despread_bits(chips, (int)n_chips, &sync,
-                                  NULL, NULL, output_bits);
+            if (despread_sync_seeded(chips, (int)n_chips,
+                                     prn_seed_i, prn_seed_q, &sync) == 0) {
+                rc = despread_bits_seeded(chips, (int)n_chips,
+                                          prn_seed_i, prn_seed_q,
+                                          &sync, NULL, NULL,
+                                          output_bits);
                 if (z_score) *z_score = sync.z_comb;
 
                 /* E/P/L sub-chip diagnostic on sample-rate buffer.
@@ -447,9 +458,9 @@ int dsss_receive_burst(const float complex *ota_buffer,
                         int8_t *prn_i = (int8_t *)malloc(DESPREAD_PRN_LEN);
                         int8_t *prn_q = (int8_t *)malloc(DESPREAD_PRN_LEN);
                         if (prn_i && prn_q) {
-                            despread_gen_prn(DESPREAD_PRN_SEED_I,
+                            despread_gen_prn(prn_seed_i,
                                              DESPREAD_PRN_LEN, prn_i);
-                            despread_gen_prn(DESPREAD_PRN_SEED_Q,
+                            despread_gen_prn(prn_seed_q,
                                              DESPREAD_PRN_LEN, prn_q);
                             int epl_off[3] = { -isps / 4, 0, isps / 4 };
                             for (int k = 0; k < DESPREAD_TOTAL_BITS; k++) {
@@ -521,5 +532,46 @@ cleanup:
     free(acq_work);
     free(work);
     free(chips);
+    return rc;
+}
+
+int dsss_receive_burst(const float complex *ota_buffer,
+                       size_t buffer_length,
+                       float sps,
+                       float fs,
+                       int max_doppler,
+                       uint8_t *output_bits,
+                       float *z_score,
+                       int *is_self_test)
+{
+    int rc;
+    float z_local = 0.0f;
+
+    if (is_self_test)
+        *is_self_test = 0;
+
+    rc = dsss_receive_burst_mode(ota_buffer, buffer_length, sps, fs,
+                                 max_doppler,
+                                 DSSS_PRN_SEED_I_NORMAL,
+                                 DSSS_PRN_SEED_Q_NORMAL,
+                                 output_bits, &z_local);
+    if (rc == 0) {
+        if (z_score) *z_score = z_local;
+        DIAG("[dsss_demod] frame mode: NORMAL\n");
+        return 0;
+    }
+
+    rc = dsss_receive_burst_mode(ota_buffer, buffer_length, sps, fs,
+                                 max_doppler,
+                                 DSSS_PRN_SEED_I_SELFTEST,
+                                 DSSS_PRN_SEED_Q_SELFTEST,
+                                 output_bits, &z_local);
+    if (rc == 0) {
+        if (z_score) *z_score = z_local;
+        if (is_self_test) *is_self_test = 1;
+        DIAG("[dsss_demod] frame mode: SELF-TEST\n");
+        return 0;
+    }
+
     return rc;
 }

@@ -107,4 +107,18 @@ int freq_acq_fft_corr(const float complex *chips, int n_chips,
                       int max_lag,
                       freq_acq_result_t *result);
 
+/**
+ * @brief FFT-correlation acquisition with explicit PRN seeds.
+ *
+ * @param prn_seed_i  PRN seed for I channel.
+ * @param prn_seed_q  PRN seed for Q channel.
+ */
+int freq_acq_fft_corr_seeded(const float complex *chips, int n_chips,
+                             float chip_rate,
+                             float freq_min, float freq_max,
+                             int max_lag,
+                             uint32_t prn_seed_i,
+                             uint32_t prn_seed_q,
+                             freq_acq_result_t *result);
+
 #endif /* FREQ_ACQ_H */
