@@ -852,8 +852,8 @@ void print_beacon_info(const BeaconInfo *info) {
     char coord_buf[50];
     
     printf("\n=== 406 MHz SECOND GENERATION BEACON (SGB) ===");
-    printf("\n Frame Mode: %s", info->frame_is_self_test ? "Self-test" : "Normal");
     printf("\n[IDENTIFICATION]");
+    printf("\n Frame Mode: %s", info->frame_is_self_test ? "Self-test" : "Normal");
     printf("\n 23 Hex ID: %s", info->hex_id);
     printf("\n Corrected 250 bits: %s", info->corrected_hex);
     printf("\n TAC Number: %u (0x%04X)", info->tac, info->tac);

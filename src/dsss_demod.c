@@ -171,13 +171,14 @@ static int dsss_receive_burst_mode(const float complex *ota_buffer,
                                    float sps,
                                    float fs,
                                    int max_doppler,
-                                   uint32_t prn_seed_i,
-                                   uint32_t prn_seed_q,
+                                   uint8_t is_test,
                                    uint8_t *output_bits,
                                    float *z_score)
 {
-    (void)max_doppler;
 
+    (void)max_doppler;
+    uint32_t prn_seed_i = is_test ? DSSS_PRN_SEED_I_SELFTEST : DSSS_PRN_SEED_I_NORMAL;
+    uint32_t prn_seed_q = is_test ? DSSS_PRN_SEED_Q_SELFTEST : DSSS_PRN_SEED_Q_NORMAL;
     if (!ota_buffer || !output_bits) return -1;
     if (sps < 4.0f || fs <= 0.0f) return -1;
 
@@ -283,8 +284,9 @@ static int dsss_receive_burst_mode(const float complex *ota_buffer,
                                  prn_seed_i, prn_seed_q,
                                  &acq) != 0 ||
         acq.confidence < acq_conf_min) {
-        DIAG("[dsss_demod] acquisition rejected "
+        DIAG("[dsss_demod] acquisition %s "
              "(freq=%.0f Hz conf=%.1f, need >=%.1f)\n",
+             is_test ? "rejected" : "skipped",
              (double)acq.freq_hz, (double)acq.confidence,
              (double)acq_conf_min);
         goto cleanup;
@@ -552,8 +554,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     rc = dsss_receive_burst_mode(ota_buffer, buffer_length, sps, fs,
                                  max_doppler,
-                                 DSSS_PRN_SEED_I_NORMAL,
-                                 DSSS_PRN_SEED_Q_NORMAL,
+                                 0,
                                  output_bits, &z_local);
     if (rc == 0) {
         if (z_score) *z_score = z_local;
@@ -563,8 +564,7 @@ int dsss_receive_burst(const float complex *ota_buffer,
 
     rc = dsss_receive_burst_mode(ota_buffer, buffer_length, sps, fs,
                                  max_doppler,
-                                 DSSS_PRN_SEED_I_SELFTEST,
-                                 DSSS_PRN_SEED_Q_SELFTEST,
+                                 1,
                                  output_bits, &z_local);
     if (rc == 0) {
         if (z_score) *z_score = z_local;
